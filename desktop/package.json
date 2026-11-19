@@ -1,0 +1,73 @@
+{
+  "name": "ofoghplus-desktop",
+  "productName": "حسابداری افق پلاس",
+  "version": "14.1.0",
+  "private": true,
+  "description": "نسخهٔ دسکتاپ آفلاین نرم‌افزار حسابداری افق پلاس — ویندوز ۱۰ و ۱۱",
+  "main": "src/main.js",
+  "author": "OfoghPlus",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis --x64",
+    "dist:portable": "electron-builder --win portable --x64",
+    "dist:legacy": "electron-builder --win nsis --x64 --ia32 --config electron-builder.legacy.yml",
+    "dist:all": "electron-builder --win nsis portable --x64 && electron-builder --win nsis --x64 --ia32 --config electron-builder.legacy.yml"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "ir.ofoghplus.hesabdari",
+    "productName": "OfoghPlus",
+    "copyright": "© 2026 نرم‌افزار حسابداری افق پلاس",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "build/icon.ico",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "resources",
+        "to": ".",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "artifactName": "OfoghPlus-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "OfoghPlus-Portable-${version}.${ext}",
+      "unicode": true,
+      "requestExecutionLevel": "user"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "حسابداری افق پلاس",
+      "uninstallDisplayName": "حسابداری افق پلاس ${version}",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico",
+      "deleteAppDataOnUninstall": false,
+      "include": "build/installer.nsh"
+    }
+  }
+}

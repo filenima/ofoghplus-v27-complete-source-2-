@@ -1,0 +1,328 @@
+name: build-desktop
+
+# ساخت خودکار هر سه خروجی دسکتاپ «حسابداری افق پلاس» (بازسازی R17-A)
+# ============================================================================
+# دو راه اجرا:
+#   ۱) دستی: تب Actions → build-desktop → Run workflow (ورژن دلخواه قابل ست است)
+#   ۲) خودکار: پوش تگِ desktop-v* → ساخت هر سه خروجی + Release کامل
+#
+# خروجی‌ها (Artifacts — ۹۰ روز می‌مانند):
+#   OfoghPlus-Setup-windows10-11/OfoghPlus-Setup-<ver>.exe        → ویندوز ۱۰/۱۱
+#   OfoghPlus-Setup-windows10-11/OfoghPlus-Portable-<ver>.exe     → ویندوز ۱۰/۱۱ (بدون نصب)
+#   OfoghPlus-Legacy-Setup-windows7-8/OfoghPlus-Legacy-Setup-…exe → ویندوز ۷ SP1/۸/۸.۱
+#   + SHA256SUMS.txt برای هر کدام
+#
+# نکتهٔ حیاتی که این workflow رعایت می‌کند:
+#   - پچ binaryTargets=["native","windows"] روی prisma/schema.prisma قبل از
+#     bun install (بدون آن، موتور Prisma ویندوز در باندل نمی‌نشیند و سرور
+#     روی ویندوز بالا نمی‌آید — ریشهٔ «نصب شد ولی باز نشد»)
+#   - بیلد با NEXT_DESKTOP=1 (بدون sharp — تصاویر unoptimized)
+#   - بررسی نهایی: libquery_engine-windows.dll.node حتماً داخل باندل باشد
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "شماره نسخه (مثلاً 14.1.0) — خالی باشد از package.json خوانده می‌شود"
+        required: false
+        default: ""
+  push:
+    tags:
+      - "desktop-v*"
+
+jobs:
+  # ──────────────── نسخهٔ مدرن + پرتابل — ویندوز ۱۰/۱۱ ────────────────
+  windows-modern:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Resolve version
+        shell: bash
+        run: |
+          PKG_VER=$(node -p "require('./desktop/package.json').version")
+          VER="${{ github.event.inputs.version }}"
+          if [ -z "$VER" ]; then VER="$PKG_VER"; fi
+          if [ "$VER" != "$PKG_VER" ]; then
+            echo "بالا بردن نسخه به $VER"
+            node -e "
+              const fs = require('fs');
+              for (const p of ['desktop/package.json', 'desktop/legacy/package.json']) {
+                const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+                j.version = '$VER';
+                fs.writeFileSync(p, JSON.stringify(j, null, 2) + '\n');
+              }
+            "
+          fi
+          echo "APP_VER=$VER" >> "$GITHUB_ENV"
+
+      - name: Patch Prisma for Windows (binaryTargets) + Install
+        shell: bash
+        run: |
+          # حیاتی: بدون این پچ، libquery_engine-windows.dll.node در باندل نمی‌نشیند
+          if ! grep -q 'binaryTargets' prisma/schema.prisma; then
+            sed -i 's|provider = "prisma-client-js"|provider = "prisma-client-js"\n  binaryTargets = ["native", "windows"]|' prisma/schema.prisma
+            grep -q 'binaryTargets' prisma/schema.prisma || { echo "پچ Prisma اعمال نشد"; exit 1; }
+          fi
+          bun install
+          bunx prisma generate
+
+      - name: Build Next.js (standalone)
+        shell: bash
+        run: |
+          NEXT_DESKTOP=1 NODE_OPTIONS="--max-old-space-size=4096" bun run build
+          test -f .next/standalone/server.js
+
+      - name: Assemble server bundle + runtime deps
+        shell: bash
+        run: |
+          SRV="desktop/resources/server"
+          rm -rf "$SRV" && mkdir -p "$SRV/db"
+          cp -r .next/standalone/. "$SRV/"
+          rm -rf "$SRV/.next/static"
+          cp -r .next/static "$SRV/.next/static"
+          cp -r public "$SRV/public"
+          # WAL checkpoint — دیتابیس سالم و کامل
+          if [ -f db/custom.db-wal ]; then
+            bun -e "const{Database}=require('bun:sqlite');const db=new Database('db/custom.db');db.exec('PRAGMA wal_checkpoint(TRUNCATE);');db.close();" || true
+          fi
+          cp db/custom.db "$SRV/db/custom.db"
+          [ -f db/blog-backup.json.gz ] && cp db/blog-backup.json.gz "$SRV/db/"
+          cp desktop/resources-template/seed.cjs "$SRV/seed.cjs"
+          cp desktop/resources-template/node16-polyfills.cjs "$SRV/node16-polyfills.cjs"
+          echo "server-bundle-$APP_VER" > "$SRV/VERSION"
+          cp desktop/build/icon.png desktop/resources/icon.png || true
+
+          # چراغ سبز سلامت: موتور Prisma ویندوز باید داخل باندل باشد
+          ENGINE=$(find "$SRV" -name '*query_engine-windows*' | head -1)
+          if [ -z "$ENGINE" ]; then
+            echo "::error::موتور Prisma ویندوز (libquery_engine-windows.dll.node) در باندل نیست — پچ binaryTargets اعمال نشده!"
+            exit 1
+          fi
+          echo "تایید شد: $(basename "$ENGINE")"
+
+          # node.exe مدرن (با آینهٔ پشتیبان برای شبکه‌های محدود)
+          mkdir -p desktop/resources/node desktop/resources/redist
+          curl -fSL --retry 3 -o desktop/resources/node/node.exe \
+            "https://nodejs.org/dist/v20.18.1/win-x64/node.exe" ||
+          curl -fSL --retry 3 -o desktop/resources/node/node.exe \
+            "https://npmmirror.com/mirrors/node/v20.18.1/win-x64/node.exe"
+          echo "v20.18.1" > desktop/resources/node/NODE_VERSION
+
+          # VC++ Redistributable — داخل نصاب باندل می‌شود (نصب بی‌صدای NSIS)
+          curl -fSL --retry 3 -o desktop/resources/redist/VC_redist.x64.exe \
+            "https://aka.ms/vs/17/release/VC_redist.x64.exe"
+          curl -fSL --retry 3 -o desktop/resources/redist/VC_redist.x86.exe \
+            "https://aka.ms/vs/17/release/VC_redist.x86.exe"
+
+          rm -rf desktop/resources/node16
+          du -sh "$SRV"
+
+      - name: Build Setup.exe + Portable (electron-builder)
+        working-directory: desktop
+        shell: bash
+        run: |
+          bun install || npm install
+          bunx electron-builder --win nsis portable --x64 || npx electron-builder --win nsis portable --x64
+
+      - name: Generate SHA256SUMS
+        shell: bash
+        run: |
+          cd desktop/dist
+          sha256sum *.exe > SHA256SUMS.txt 2>/dev/null || true
+          cat SHA256SUMS.txt || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OfoghPlus-Setup-windows10-11
+          path: |
+            desktop/dist/OfoghPlus-Setup-*.exe
+            desktop/dist/OfoghPlus-Portable-*.exe
+            desktop/dist/SHA256SUMS.txt
+          retention-days: 90
+          if-no-files-found: error
+
+  # ──────────────── نسخهٔ Legacy — ویندوز ۷ SP1 / ۸ / ۸.۱ ────────────────
+  windows-legacy:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Resolve version
+        shell: bash
+        run: |
+          PKG_VER=$(node -p "require('./desktop/package.json').version")
+          VER="${{ github.event.inputs.version }}"
+          if [ -z "$VER" ]; then VER="$PKG_VER"; fi
+          if [ "$VER" != "$PKG_VER" ]; then
+            node -e "
+              const fs = require('fs');
+              for (const p of ['desktop/package.json', 'desktop/legacy/package.json']) {
+                const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+                j.version = '$VER';
+                fs.writeFileSync(p, JSON.stringify(j, null, 2) + '\n');
+              }
+            "
+          fi
+          echo "APP_VER=$VER" >> "$GITHUB_ENV"
+
+      - name: Patch Prisma for Windows (binaryTargets) + Install
+        shell: bash
+        run: |
+          if ! grep -q 'binaryTargets' prisma/schema.prisma; then
+            sed -i 's|provider = "prisma-client-js"|provider = "prisma-client-js"\n  binaryTargets = ["native", "windows"]|' prisma/schema.prisma
+            grep -q 'binaryTargets' prisma/schema.prisma || { echo "پچ Prisma اعمال نشد"; exit 1; }
+          fi
+          bun install
+          bunx prisma generate
+
+      - name: Build Next.js (standalone)
+        shell: bash
+        run: |
+          NEXT_DESKTOP=1 NODE_OPTIONS="--max-old-space-size=4096" bun run build
+          test -f .next/standalone/server.js
+
+      - name: Assemble server bundle + Node 16 + VC++ redist
+        shell: bash
+        run: |
+          SRV="desktop/resources/server"
+          rm -rf "$SRV" && mkdir -p "$SRV/db"
+          cp -r .next/standalone/. "$SRV/"
+          rm -rf "$SRV/.next/static"
+          cp -r .next/static "$SRV/.next/static"
+          cp -r public "$SRV/public"
+          if [ -f db/custom.db-wal ]; then
+            bun -e "const{Database}=require('bun:sqlite');const db=new Database('db/custom.db');db.exec('PRAGMA wal_checkpoint(TRUNCATE);');db.close();" || true
+          fi
+          cp db/custom.db "$SRV/db/custom.db"
+          [ -f db/blog-backup.json.gz ] && cp db/blog-backup.json.gz "$SRV/db/"
+          cp desktop/resources-template/seed.cjs "$SRV/seed.cjs"
+          cp desktop/resources-template/node16-polyfills.cjs "$SRV/node16-polyfills.cjs"
+          echo "server-bundle-$APP_VER" > "$SRV/VERSION"
+          cp desktop/build/icon.png desktop/resources/icon.png || true
+
+          ENGINE=$(find "$SRV" -name '*query_engine-windows*' | head -1)
+          if [ -z "$ENGINE" ]; then
+            echo "::error::موتور Prisma ویندوز (libquery_engine-windows.dll.node) در باندل نیست — پچ binaryTargets اعمال نشده!"
+            exit 1
+          fi
+          echo "تایید شد: $(basename "$ENGINE")"
+
+          # Node 16.20.2 — آخرین نودِ سازگار با ویندوز ۷/۸
+          mkdir -p desktop/resources/node desktop/resources/redist
+          curl -fSL --retry 3 -o desktop/resources/node/node.exe \
+            "https://nodejs.org/dist/v16.20.2/win-x64/node.exe" ||
+          curl -fSL --retry 3 -o desktop/resources/node/node.exe \
+            "https://npmmirror.com/mirrors/node/v16.20.2/win-x64/node.exe"
+          curl -fSL --retry 3 -o desktop/resources/node/node-ia32.exe \
+            "https://nodejs.org/dist/v16.20.2/win-x86/node.exe" ||
+          curl -fSL --retry 3 -o desktop/resources/node/node-ia32.exe \
+            "https://npmmirror.com/mirrors/node/v16.20.2/win-x86/node.exe"
+          echo "v16.20.2" > desktop/resources/node/NODE_VERSION
+
+          curl -fSL --retry 3 -o desktop/resources/redist/VC_redist.x64.exe \
+            "https://aka.ms/vs/17/release/VC_redist.x64.exe"
+          curl -fSL --retry 3 -o desktop/resources/redist/VC_redist.x86.exe \
+            "https://aka.ms/vs/17/release/VC_redist.x86.exe"
+          du -sh "$SRV"
+
+      - name: Build Legacy Setup.exe (Electron 22.3.27 — NSIS x64+ia32)
+        working-directory: desktop
+        shell: bash
+        run: |
+          bun install || npm install
+          bunx electron-builder --win nsis --x64 --ia32 --config electron-builder.legacy.yml || \
+            npx electron-builder --win nsis --x64 --ia32 --config electron-builder.legacy.yml
+
+      - name: Generate SHA256SUMS
+        shell: bash
+        run: |
+          cd desktop/dist-legacy
+          sha256sum *.exe > SHA256SUMS.txt 2>/dev/null || true
+          cat SHA256SUMS.txt || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OfoghPlus-Legacy-Setup-windows7-8
+          path: |
+            desktop/dist-legacy/OfoghPlus-Legacy-Setup-*.exe
+            desktop/dist-legacy/SHA256SUMS.txt
+          retention-days: 90
+          if-no-files-found: error
+
+  # ──────────────── Release (فقط وقتی تگ desktop-v* پوش شود) ────────────────
+  release:
+    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    needs: [windows-modern, windows-legacy]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Build combined SHA256SUMS.txt
+        shell: bash
+        run: |
+          cd artifacts
+          find . -type f \( -name "*.exe" -o -name "*.zip" \) -exec sha256sum {} \; | sed 's|\./[^/]*/||' > SHA256SUMS.txt || true
+          cat SHA256SUMS.txt || true
+
+      - name: Create Release with all installers
+        uses: softprops/action-gh-release@v2
+        with:
+          name: نسخهٔ دسکتاپ ${{ github.ref_name }}
+          body: |
+            ## نصب‌کننده‌های دسکتاپ «حسابداری افق پلاس»
+
+            | فایل | سیستم‌عامل |
+            |---|---|
+            | OfoghPlus-Setup-*.exe | ویندوز ۱۰ و ۱۱ |
+            | OfoghPlus-Portable-*.exe | ویندوز ۱۰ و ۱۱ (بدون نصب) |
+            | OfoghPlus-Legacy-Setup-*-x64.exe | ویندوز ۷ SP1 / ۸ / ۸.۱ (۶۴بیتی) |
+            | OfoghPlus-Legacy-Setup-*-ia32.exe | ویندوز ۷ SP1 / ۸ / ۸.۱ (۳۲بیتی) |
+
+            ### نصب
+            ۱. فایل را دانلود کنید و روی آن دابل‌کلیک کنید (SmartScreen → More info → Run anyway).
+            ۲. مسیر نصب را انتخاب کنید → Install (نصب Visual C++ لازم بود بی‌صدا انجام می‌شود).
+            ۳. آیکن «حسابداری افق پلاس» روی دسکتاپ را باز کنید.
+
+            ### ویندوز ۷ — پیش‌نیازها (فقط بار اول)
+            - Service Pack 1
+            - به‌روزرسانی KB4474419 (پشتیبانی امضای SHA-2)
+            - به‌روزرسانی KB3126587 و KB3063858
+            (اگر ویندوز آپدیت نیست، از پوشهٔ resources\redist داخل مسیر نصب، VC_redist را دستی اجرا کنید)
+
+            ### ورود اول (نصب تازه)
+            نام کاربری: `admin` — رمز: `admin1234` (بلافاصله از تنظیمات تغییر دهید)
+
+            ### کنترل سلامت دانلود
+            فایل SHA256SUMS.txt را با دانلود مقایسه کنید:
+            `certutil -hashfile OfoghPlus-Setup-*.exe SHA256`
+          files: |
+            artifacts/OfoghPlus-Setup-windows10-11/*.exe
+            artifacts/OfoghPlus-Legacy-Setup-windows7-8/*.exe
+            artifacts/SHA256SUMS.txt

@@ -1,0 +1,17 @@
+{
+  "name": "ofoghplus-desktop-legacy-dev",
+  "productName": "حسابداری افق پلاس (ویندوز ۷/۸)",
+  "version": "14.1.0",
+  "private": true,
+  "description": "پکیج توسعه برای اجرای محلی Electron 22 روی کد مشترک — ساخت نصب Legacy از خود desktop/ انجام می‌شود (electron-builder.legacy.yml)",
+  "main": "../src/main.js",
+  "author": "OfoghPlus",
+  "scripts": {
+    "start": "electron ../src/main.js",
+    "dist": "cd .. && electron-builder --win nsis --x64 --ia32 --config electron-builder.legacy.yml"
+  },
+  "devDependencies": {
+    "electron": "22.3.27"
+  },
+  "_comment_build": "ساخت واقعی نصاب Legacy:  cd desktop && npx electron-builder --win nsis --x64 --ia32 --config electron-builder.legacy.yml  — فایل electron-builder.legacy.yml در desktop/ است تا هیچ مسیر ../ در files لازم نباشد."
+}

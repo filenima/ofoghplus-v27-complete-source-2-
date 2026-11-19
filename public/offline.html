@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<!-- ============================================================================
+  افق پلاس — صفحهٔ آفلاین PWA (R24-5 — پولیش «۱۰۰٪ آفلاین»)
+  ─ این فایل توسط Service Worker (sw.js) به‌عنوان پوستهٔ جایگزینِ ناوبری‌های
+    آفلاین سرو می‌شود و مسیر بازگشت را با window.HOOSH_RETURN_PATH تزریق
+    می‌گیرد (قرارداد sw.js v3+ — دست نبرید مگر هماهنگ با sw.js).
+  ─ قراردادهای حفظ‌شده: id="retryBtn"، window.HOOSH_RETURN_PATH،
+    ?return=/path، رویداد online و نظرسنجی /api/health
+  ─ R24-5: نمایش وضعیت اتصال زنده + تعداد موارد در انتظار همگام‌سازی
+    (خوانده‌شده از IndexedDB همین صفحه — هر دو صف ofogh-offline و hoosh-offline)
+============================================================================ -->
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex">
+<meta name="theme-color" content="#064e3b">
+<title>افق پلاس — حالت آفلاین</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: "Vazirmatn", "Segoe UI", Tahoma, Arial, sans-serif;
+    background:
+      radial-gradient(1100px 600px at 50% -18%, rgba(16, 185, 129, 0.25), transparent 60%),
+      radial-gradient(700px 420px at 85% 110%, rgba(6, 95, 75, 0.5), transparent 65%),
+      linear-gradient(160deg, #052e22 0%, #064e3b 48%, #04543f 100%);
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #ecfdf5;
+    padding: 20px;
+  }
+
+  .card {
+    background: rgba(6, 78, 59, 0.5);
+    border: 1px solid rgba(167, 243, 208, 0.22);
+    border-radius: 24px;
+    padding: 40px 32px;
+    max-width: 470px;
+    width: 100%;
+    text-align: center;
+    backdrop-filter: blur(10px);
+    box-shadow: 0 24px 60px rgba(2, 44, 34, 0.45);
+    animation: rise 0.5s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  }
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(12px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  .logo {
+    width: 84px;
+    height: 84px;
+    margin: 0 auto 20px;
+    border-radius: 23px;
+    background: linear-gradient(145deg, #34d399 0%, #10b981 55%, #059669 100%);
+    box-shadow: 0 16px 34px rgba(16, 185, 129, 0.35), inset 0 2px 0 rgba(255, 255, 255, 0.25);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+  }
+  .logo .glyph { color: #fff; font-weight: 700; font-size: 32px; line-height: 1; }
+  .logo .dot {
+    position: absolute; top: -4px; inset-inline-end: -4px;
+    width: 16px; height: 16px; border-radius: 999px;
+    background: #a7f3d0; box-shadow: 0 0 0 4px rgba(167, 243, 208, 0.2);
+  }
+
+  h1 { font-size: 21px; margin-bottom: 8px; color: #fff; }
+  p  { font-size: 14px; line-height: 2; color: #ccfbf1; margin-bottom: 6px; }
+  .headline { font-size: 15px; font-weight: 700; color: #a7f3d0; }
+
+  /* ─── R24-5: وضعیت اتصال زنده ─── */
+  .status-row { display: flex; justify-content: center; gap: 10px; margin: 14px 0 4px; flex-wrap: wrap; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 12px; font-weight: 700;
+    padding: 6px 14px; border-radius: 999px;
+    border: 1px solid rgba(167, 243, 208, 0.25);
+    background: rgba(2, 44, 34, 0.45);
+    color: #d1fae5;
+  }
+  .pill .led { width: 8px; height: 8px; border-radius: 50%; background: #fbbf24; animation: pulse 1.6s infinite; }
+  .pill.online .led { background: #34d399; }
+  .pill.pending-count { border-color: rgba(251, 191, 36, 0.35); color: #fde68a; }
+  .pill.pending-count .led { background: #fbbf24; }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(251, 191, 36, 0.45); }
+    70%  { box-shadow: 0 0 0 8px rgba(251, 191, 36, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(251, 191, 36, 0); }
+  }
+
+  /* ─── قابلیت‌های در دسترس آفلاین ─── */
+  ul {
+    text-align: right;
+    font-size: 13px;
+    line-height: 2.1;
+    color: #d1fae5;
+    margin: 14px 22px 20px;
+    list-style: none;
+  }
+  ul li::before { content: "✓ "; color: #6ee7b7; font-weight: bold; }
+
+  button {
+    background: #ffffff;
+    color: #064e3b;
+    border: none;
+    border-radius: 12px;
+    padding: 12px 28px;
+    font-size: 15px;
+    font-weight: bold;
+    font-family: inherit;
+    cursor: pointer;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+  }
+  button:hover { transform: translateY(-1px); box-shadow: 0 10px 26px rgba(0, 0, 0, 0.3); }
+
+  .pulse {
+    display: inline-flex; align-items: center; gap: 8px;
+    margin-top: 16px; font-size: 12px; color: #a7f3d0; opacity: 0.85;
+  }
+  .dot-pulse {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #6ee7b7; animation: pulse 1.6s infinite;
+  }
+
+  .footer { margin-top: 22px; font-size: 11px; color: rgba(204, 251, 241, 0.55); }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo" aria-hidden="true">
+      <span class="glyph">افق+</span>
+      <span class="dot"></span>
+    </div>
+
+    <h1>حالت آفلاین افق پلاس</h1>
+    <p class="headline">نگران نباشید — برنامه روی همین دستگاه کامل در دسترس است</p>
+
+    <!-- R24-5: وضعیت اتصال + موارد در انتظار همگام‌سازی -->
+    <div class="status-row">
+      <span class="pill" id="connPill"><span class="led"></span><span id="connText">اتصال قطع است</span></span>
+      <span class="pill pending-count" id="pendingPill" hidden><span class="led"></span><span id="pendingText">۰ مورد در انتظار همگام‌سازی</span></span>
+    </div>
+
+    <ul>
+      <li>صفحه‌ها و آخرین داده‌ها (کالاها، طرف‌حساب‌ها، فاکتورها) ذخیره شده‌اند</li>
+      <li>ثبت فاکتور جدید بدون اینترنت کار می‌کند (ذخیرهٔ محلی امن)</li>
+      <li>فاکتورهای آفلاین با شمارهٔ موقت OFF ساخته و صدر لیست می‌آیند</li>
+      <li>به‌محض وصل‌شدن اینترنت، همه‌چیز به‌ترتیب و خودکار همگام می‌شود</li>
+    </ul>
+    <button id="retryBtn">تلاش برای بازگشت به برنامه</button>
+    <div class="pulse">
+      <span class="dot-pulse"></span>
+      <span>به‌محض اتصال، خودکار باز می‌گردیم…</span>
+    </div>
+    <div class="footer">افق پلاس — نرم‌افزار حسابداری · حالت آفلاین مرورگر</div>
+  </div>
+
+  <script>
+    /* ============================================================
+     * مسیر بازگشت — قرارداد sw.js (بدون تغییر):
+     *  ۱) سرو inline توسط سرویس‌ورکر → window.HOOSH_RETURN_PATH تزریق می‌شود
+     *  ۲) مستقیم /offline.html?return=/path → از پارامتر query
+     * نتیجه: صفحه «مسیر را گم نمی‌کند» و به همان جای کاربر برمی‌گردد.
+     */
+    var returnPath = "";
+    try {
+      if (window.HOOSH_RETURN_PATH && window.HOOSH_RETURN_PATH.charAt(0) === "/") {
+        returnPath = window.HOOSH_RETURN_PATH;
+      } else if (location.pathname !== "/offline.html" && location.pathname !== "/offline") {
+        returnPath = location.pathname + (location.search || "");
+      } else {
+        var q = new URLSearchParams(location.search).get("return");
+        if (q && q.charAt(0) === "/") returnPath = q;
+      }
+    } catch (e) {}
+    if (!returnPath || returnPath.charAt(0) !== "/") returnPath = "/";
+
+    function goBack() { location.replace(returnPath); }
+
+    var btn = document.getElementById("retryBtn");
+    if (btn) btn.addEventListener("click", goBack);
+
+    /* ─── R24-5: وضعیت اتصال زنده ─── */
+    var connPill = document.getElementById("connPill");
+    var connText = document.getElementById("connText");
+    function renderConn() {
+      var on = navigator.onLine === true;
+      if (connPill) connPill.className = "pill" + (on ? " online" : "");
+      if (connText) connText.textContent = on ? "متصل — در حال بازگشت…" : "اتصال قطع است";
+    }
+    renderConn();
+    window.addEventListener("online", function () {
+      renderConn();
+      setTimeout(goBack, 900);
+    });
+    window.addEventListener("offline", renderConn);
+
+    /* ─── R24-5: تعداد موارد در انتظار همگام‌سازی (هر دو صف IDB) ───
+     * صف جدید «ofogh-offline» (outbox + پیش‌نویس فاکتورهای آفلاین) و صف
+     * قدیمی «hoosh-offline» (outbox). خواندن مستقیم IndexedDB — بدون وابستگی.
+     */
+    function faDigits(n) {
+      return String(n).replace(/\d/g, function (d) { return "۰۱۲۳۴۵۶۷۸۹"[+d]; });
+    }
+    function countStore(dbName, version, storeName) {
+      return new Promise(function (resolve) {
+        try {
+          var req = indexedDB.open(dbName, version);
+          req.onsuccess = function () {
+            var db = req.result;
+            try {
+              if (!db.objectStoreNames.contains(storeName)) { db.close(); return resolve(0); }
+              var c = db.transaction(storeName, "readonly").objectStore(storeName).count();
+              c.onsuccess = function () { db.close(); resolve(c.result || 0); };
+              c.onerror = function () { db.close(); resolve(0); };
+            } catch (e) { try { db.close(); } catch (e2) {} resolve(0); }
+          };
+          req.onerror = function () { resolve(0); };
+          req.onblocked = function () { resolve(0); };
+        } catch (e) { resolve(0); }
+      });
+    }
+    function refreshPending() {
+      Promise.all([
+        countStore("ofogh-offline", 1, "outbox"),
+        countStore("ofogh-offline", 1, "invoices"),
+        countStore("hoosh-offline", 2, "outbox")
+      ]).then(function (counts) {
+        var drafts = counts[1] || 0; // پیش‌نویس‌ها (offline-draft/conflict)
+        var total = (counts[0] || 0) + (counts[2] || 0) + (drafts > 0 ? 1 : 0);
+        var pill = document.getElementById("pendingPill");
+        var text = document.getElementById("pendingText");
+        if (!pill || !text) return;
+        if (total > 0) {
+          pill.hidden = false;
+          text.textContent = faDigits(total) + " مورد در انتظار همگام‌سازی";
+        } else {
+          pill.hidden = true;
+        }
+      });
+    }
+    refreshPending();
+    setInterval(refreshPending, 8000);
+
+    /* بازگشت خودکار به محض اتصال — تلاش دوره‌ای سبک هر ۷ ثانیه.
+     * سرویس‌ورکر در آفلاین به /api/health کد ۵۰۳ صریح می‌دهد → res.ok=false → می‌مانیم. */
+    setInterval(function () {
+      if (navigator.onLine) {
+        fetch("/api/health", { method: "HEAD" })
+          .then(function (res) { if (res.ok) goBack(); })
+          .catch(function () {});
+      }
+    }, 7000);
+  </script>
+</body>
+</html>

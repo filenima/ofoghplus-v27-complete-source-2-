@@ -1,0 +1,56 @@
+# electron-builder.legacy.yml — نسخهٔ ویندوز ۷/۸ (Electron 22.3.27 — آخرین نسخهٔ سازگار)
+# ============================================================================
+# این فایل از داخل پوشهٔ desktop/ اجرا می‌شود (پروژه همان desktop است؛ فقط
+# خروجی و نسخهٔ الکترون فرق دارد) — برخلاف پکیج legacy جدا، دیگر هیچ مسیر
+# «../» وجود ندارد که electron-builder نتواند pack کند:
+#
+#   cd desktop
+#   npx electron-builder --win nsis --x64 --ia32 --config electron-builder.legacy.yml
+#
+# تفاوت با نسخهٔ مدرن:
+#   - electronVersion: 22.3.27 (Chromium 108 — آخرین کرومیومی که روی ویندوز ۷/۸.۱ اجرا می‌شود)
+#   - معماری x64 + ia32 (ویندوز ۷ ۳۲بیتی هنوز در ایران فراوان است)
+#   - appId و نام خروجی جدا تا با نسخهٔ مدرن قاطی نشود
+#   - پیش‌نیازهای ویندوز ۷: SP1 + KB4474419 (SHA-2) + KB3126587/KB3063858
+#     (مستندات: desktop/TROUBLESHOOTING-fa.md)
+
+electronVersion: 22.3.27
+appId: ir.ofoghplus.hesabdari.legacy
+productName: OfoghPlus Legacy
+copyright: © 2026 نرم‌افزار حسابداری افق پلاس
+
+directories:
+  output: dist-legacy
+  buildResources: build
+
+files:
+  - src/**/*
+  - build/icon.ico
+
+extraResources:
+  - from: resources
+    to: .
+    filter:
+      - "**/*"
+
+win:
+  target:
+    - target: nsis
+      arch: [x64, ia32]
+  icon: build/icon.ico
+  artifactName: OfoghPlus-Legacy-Setup-${version}-${arch}.${ext}
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowElevation: true
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: "حسابداری افق پلاس (ویندوز ۷/۸)"
+  uninstallDisplayName: "حسابداری افق پلاس Legacy ${version}"
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
+  installerHeaderIcon: build/icon.ico
+  deleteAppDataOnUninstall: false
+  include: build/installer.nsh
